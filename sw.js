@@ -1,6 +1,6 @@
 /* Calisthenia service worker — offline-first για το app shell.
    Το AI chat χρειάζεται δίκτυο, αλλά όλα τα υπόλοιπα δουλεύουν offline. */
-const CACHE = "calisthenia-v1";
+const CACHE = "calisthenia-v2";
 const SHELL = [
   "./",
   "./index.html",

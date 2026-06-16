@@ -164,12 +164,25 @@ const muscleColor = {
 };
 const muscleName = { back:"Πλάτη", chest:"Στήθος", arms:"Χέρια", legs:"Πόδια", core:"Κορμός", cardio:"Καρδιο" };
 
-/* ---------- PROGRAM (which exercises each training day) ---------- */
+/* ---------- WORKOUTS catalog (pick any of these on any day) ----------
+   Each workout has a STABLE key, a name, a focus line, an accent muscle
+   group (for the calendar dot color) and its list of exercises. */
+const WORKOUTS = {
+  upperA:{ name:"Upper A", focus:"Έλξη + Ώθηση",        accent:"back",  ex:["pullup","dips","aussie","pushup","chinup"] },
+  lowerA:{ name:"Lower A", focus:"Πόδια + Στίβος",       accent:"legs",  ex:["sprint60","bulgarian","stepup","calf","jog"] },
+  upperB:{ name:"Upper B", focus:"Ώμοι + Πάνω κορμός",   accent:"chest", ex:["pullupwide","pike","dips2","invrow","diamond"] },
+  lowerB:{ name:"Lower B + Core", focus:"Πόδια + Κορμός", accent:"legs", ex:["stairs","lunges","jumpsquat","legraise","lsit","plank"] },
+  core:{   name:"Core",    focus:"Κορμός + Σταθερότητα",  accent:"core",  ex:["legraise","lsit","plank","jumpsquat"] }
+};
+const WORKOUT_ORDER = ["upperA","lowerA","upperB","lowerB","core"];
+
+/* PROGRAM = the SUGGESTED base week. Maps weekday -> workout key.
+   It is only a default proposal; the user can put any workout on any date. */
 const PROGRAM = {
-  mon:{ name:"Upper A", focus:"Έλξη + Ώθηση",   ex:["pullup","dips","aussie","pushup","chinup"] },
-  tue:{ name:"Lower A", focus:"Πόδια + Στίβος",  ex:["sprint60","bulgarian","stepup","calf","jog"] },
-  thu:{ name:"Upper B", focus:"Ώμοι + Πάνω κορμός", ex:["pullupwide","pike","dips2","invrow","diamond"] },
-  sat:{ name:"Lower B + Core", focus:"Πόδια + Κορμός", ex:["stairs","lunges","jumpsquat","legraise","lsit","plank"] }
+  mon:{ name:"Upper A", focus:"Έλξη + Ώθηση",   ex:WORKOUTS.upperA.ex, w:"upperA" },
+  tue:{ name:"Lower A", focus:"Πόδια + Στίβος",  ex:WORKOUTS.lowerA.ex, w:"lowerA" },
+  thu:{ name:"Upper B", focus:"Ώμοι + Πάνω κορμός", ex:WORKOUTS.upperB.ex, w:"upperB" },
+  sat:{ name:"Lower B + Core", focus:"Πόδια + Κορμός", ex:WORKOUTS.lowerB.ex, w:"lowerB" }
 };
 const dayKeyByJs = { 1:"mon", 2:"tue", 4:"thu", 6:"sat" };
 const dayGr = { mon:"Δευτέρα", tue:"Τρίτη", thu:"Πέμπτη", sat:"Σάββατο" };
@@ -201,7 +214,7 @@ const GUIDES = {
 };
 
 /* expose to next file part */
-window.__CALIS__ = { demo, EX, muscleColor, muscleName, PROGRAM, dayKeyByJs, dayGr, dayOrder, GUIDES };
+window.__CALIS__ = { demo, EX, muscleColor, muscleName, PROGRAM, WORKOUTS, WORKOUT_ORDER, dayKeyByJs, dayGr, dayOrder, GUIDES };
 })();
 
 /* ============================================================
@@ -209,10 +222,10 @@ window.__CALIS__ = { demo, EX, muscleColor, muscleName, PROGRAM, dayKeyByJs, day
    ============================================================ */
 (function(){
 'use strict';
-const { demo, EX, muscleColor, muscleName, PROGRAM, dayKeyByJs, dayGr, dayOrder, GUIDES } = window.__CALIS__;
+const { demo, EX, muscleColor, muscleName, PROGRAM, WORKOUTS, WORKOUT_ORDER, dayKeyByJs, dayGr, dayOrder, GUIDES } = window.__CALIS__;
 
 /* ---------- IndexedDB ---------- */
-const DB_NAME="CalistheniaDB", DB_VER=1; let db=null;
+const DB_NAME="CalistheniaDB", DB_VER=2; let db=null;
 function initDB(){
   return new Promise((res,rej)=>{
     const r=indexedDB.open(DB_NAME,DB_VER);
@@ -221,6 +234,7 @@ function initDB(){
       if(!d.objectStoreNames.contains('sessions')) d.createObjectStore('sessions',{keyPath:'date'});
       if(!d.objectStoreNames.contains('sets')) d.createObjectStore('sets',{keyPath:'id'});
       if(!d.objectStoreNames.contains('profile')) d.createObjectStore('profile',{keyPath:'key'});
+      if(!d.objectStoreNames.contains('plan')) d.createObjectStore('plan',{keyPath:'date'});
     };
     r.onsuccess=e=>{db=e.target.result;res();};
     r.onerror=e=>rej(e.target.error);
@@ -230,6 +244,7 @@ function put(store,data){return new Promise(r=>{const tx=db.transaction(store,'r
 function get(store,key){return new Promise(r=>{const tx=db.transaction(store,'readonly');const q=tx.objectStore(store).get(key);q.onsuccess=()=>r(q.result);q.onerror=()=>r(null);});}
 function all(store){return new Promise(r=>{const tx=db.transaction(store,'readonly');const q=tx.objectStore(store).getAll();q.onsuccess=()=>r(q.result||[]);});}
 function clearStore(store){return new Promise(r=>{const tx=db.transaction(store,'readwrite');tx.objectStore(store).clear();tx.oncomplete=()=>r();});}
+function del(store,key){return new Promise(r=>{const tx=db.transaction(store,'readwrite');tx.objectStore(store).delete(key);tx.oncomplete=()=>r();});}
 
 /* ---------- helpers ---------- */
 const $=s=>document.querySelector(s);
@@ -257,48 +272,142 @@ tabs.forEach(t=>t.onclick=async()=>{
 
 /* ============================================================
    TODAY — runner with set logging + targets
+   Now date-aware: can view/log ANY date, with a workout assigned
+   per date (free choice), falling back to the suggested base week.
    ============================================================ */
 let calState={y:new Date().getFullYear(), m:new Date().getMonth()};
+let viewDate=todayKey();   // the date currently shown in the runner
+
+/* what workout is on this date?
+   priority: explicit assignment in `plan` store -> suggested base week -> none */
+async function resolveWorkout(date){
+  const assigned=await get('plan',date);
+  if(assigned && assigned.workout && WORKOUTS[assigned.workout]){
+    return { key:assigned.workout, wk:WORKOUTS[assigned.workout], source:'assigned' };
+  }
+  // fall back to suggested base week by weekday
+  const [Y,M,D]=date.split('-').map(Number);
+  const jsDay=new Date(Y,M-1,D).getDay();
+  const dk=dayKeyByJs[jsDay];
+  if(dk){ const wkey=PROGRAM[dk].w; return { key:wkey, wk:WORKOUTS[wkey], source:'suggested' }; }
+  return { key:null, wk:null, source:'rest' };
+}
+
+function prettyDate(date){
+  const [Y,M,D]=date.split('-').map(Number);
+  const d=new Date(Y,M-1,D);
+  const wd=["Κυριακή","Δευτέρα","Τρίτη","Τετάρτη","Πέμπτη","Παρασκευή","Σάββατο"][d.getDay()];
+  const mo=["Ιαν","Φεβ","Μαρ","Απρ","Μαΐ","Ιουν","Ιουλ","Αυγ","Σεπ","Οκτ","Νοε","Δεκ"][M-1];
+  return `${wd} ${D} ${mo}`;
+}
+const isToday=date=>date===todayKey();
 
 async function renderToday(){
-  const jsDay=new Date().getDay();
-  const dk=dayKeyByJs[jsDay];
-  const date=todayKey();
+  const date=viewDate;
+  const {key:wkey, wk, source}=await resolveWorkout(date);
   let html='';
 
-  if(!dk){
-    // rest day — show next workout + calendar
+  // date bar: lets you jump prev/next day, and shows where you are
+  html+=`<div class="datebar">
+    <button class="navbtn" onclick="window._dayMove(-1)"><svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg></button>
+    <div class="datebar-mid">
+      <div class="datebar-day">${isToday(date)?'Σήμερα':prettyDate(date)}</div>
+      <div class="datebar-sub">${isToday(date)?prettyDate(date):''}</div>
+    </div>
+    <button class="navbtn" onclick="window._dayMove(1)"><svg viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></svg></button>
+  </div>`;
+  if(!isToday(date)){
+    html+=`<button class="btn btn-ghost btn-sm" style="width:100%;margin-bottom:10px" onclick="window._goToday()">↩︎ Πήγαινε στο σήμερα</button>`;
+  } else {
+    // reminder if it's been a while since last completed session
+    const gap=await daysSinceLast();
+    if(gap!==null && gap>=2){
+      html+=`<div class="reminder">💡 Έχεις <b>${gap} μέρες</b> να γυμναστείς. ${wk?'Έτοιμη προπόνηση σήμερα — πάμε!':'Βάλε μια προπόνηση και ξεκίνα!'}</div>`;
+    }
+  }
+
+  if(!wk){
+    // rest day (no assignment, not a base-week training day)
     const next=nextTrainingDay();
     html+=`<div class="hero-card"><div class="rest-hero">
       <div class="big">🌙</div>
       <div class="hero-title">Μέρα ξεκούρασης</div>
-      <div class="hero-focus">Η αποκατάσταση είναι μέρος της προπόνησης. Επόμενη: <b style="color:var(--amber)">${next}</b></div>
-    </div></div>`;
+      <div class="hero-focus">Καμία προπόνηση ορισμένη. Επόμενη προτεινόμενη: <b style="color:var(--amber)">${next}</b></div>
+    </div></div>
+    <button class="btn btn-amber" onclick="window._openWorkoutPicker('${date}')">${checkSvg} Βάλε προπόνηση αυτή τη μέρα</button>
+    <div style="height:6px"></div>`;
   } else {
-    const p=PROGRAM[dk];
     const done=await getSessionDone(date);
-    const prog=await dayProgress(date,dk);
+    const prog=await dayProgress(date,wkey);
+    const srcTag = source==='assigned'
+      ? `<span class="src-tag assigned">δικό σου</span>`
+      : `<span class="src-tag suggested">προτεινόμενο</span>`;
     html+=`<div class="hero-card">
-      <div class="hero-label">${dayGr[dk]} · Σήμερα</div>
-      <div class="hero-title">${p.name}</div>
-      <div class="hero-focus">${p.focus}</div>
+      <div class="hero-label">${prettyDate(date)} ${srcTag}</div>
+      <div class="hero-title">${wk.name}</div>
+      <div class="hero-focus">${wk.focus}</div>
       <div class="hero-stats">
-        <div class="hero-stat"><div class="n">${p.ex.length}</div><div class="l">ασκήσεις</div></div>
+        <div class="hero-stat"><div class="n">${wk.ex.length}</div><div class="l">ασκήσεις</div></div>
         <div class="hero-stat"><div class="n" style="color:var(--moss)">${prog.doneSets}</div><div class="l">σετ done</div></div>
         <div class="hero-stat"><div class="n" style="color:var(--amber)">${prog.pct}%</div><div class="l">ολοκλήρωση</div></div>
       </div>
     </div>`;
-    html+=`<button class="btn ${done?'btn-moss':'btn-amber'}" onclick="window._toggleSession('${date}')">
-      ${done?checkSvg+' Ολοκληρωμένη — άριστα':checkSvg+' Σήμανση προπόνησης ως ολοκληρωμένη'}</button>`;
+    html+=`<div class="row-2">
+      <button class="btn ${done?'btn-moss':'btn-amber'}" onclick="window._toggleSession('${date}')">
+        ${done?checkSvg+' Ολοκληρωμένη':checkSvg+' Ολοκλήρωση'}</button>
+      <button class="btn btn-ghost" onclick="window._openWorkoutPicker('${date}')">↔︎ Αλλαγή</button>
+    </div>`;
     html+='<div style="height:8px"></div>';
-    for(let i=0;i<p.ex.length;i++){
-      html+=await exCardHTML(date, p.ex[i], i);
+    for(let i=0;i<wk.ex.length;i++){
+      html+=await exCardHTML(date, wk.ex[i], i);
     }
   }
   // mini calendar strip always visible
   html+=await calendarHTML();
   $('#panel-today').innerHTML=html;
 }
+
+window._dayMove=dir=>{
+  const [Y,M,D]=viewDate.split('-').map(Number);
+  const d=new Date(Y,M-1,D); d.setDate(d.getDate()+dir);
+  viewDate=d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate();
+  calState={y:d.getFullYear(), m:d.getMonth()};
+  renderToday();
+};
+window._goToday=()=>{ viewDate=todayKey(); const t=new Date(); calState={y:t.getFullYear(),m:t.getMonth()}; renderToday(); };
+window._openDate=date=>{ viewDate=date; renderToday(); window.scrollTo(0,0); };
+
+/* ---------- workout picker (assign any workout to a date) ---------- */
+window._openWorkoutPicker=async(date)=>{
+  const cur=await get('plan',date);
+  const curKey=cur?cur.workout:null;
+  let cards=WORKOUT_ORDER.map(k=>{
+    const w=WORKOUTS[k]; const mc=muscleColor[w.accent];
+    const sel=curKey===k?'sel':'';
+    const exNames=w.ex.map(x=>EX[x].n.split(' (')[0]).slice(0,4).join(' · ');
+    return `<button class="pick-card ${sel}" onclick="window._assignWorkout('${date}','${k}')">
+      <div class="pick-top"><span class="pick-name">${w.name}</span>
+      <span class="ex-tag" style="color:${mc.c};background:${mc.bg}">${w.focus}</span></div>
+      <div class="pick-ex">${exNames}${w.ex.length>4?' …':''}</div>
+    </button>`;
+  }).join('');
+  let extra = curKey ? `<button class="btn btn-ghost btn-sm" style="width:100%;margin-top:6px" onclick="window._clearWorkout('${date}')">✕ Αφαίρεση προπόνησης από τη μέρα</button>` : '';
+  window._openModal(`Διάλεξε προπόνηση<div style="font-size:12px;color:var(--chalk-2);font-weight:500;margin-top:3px">${prettyDate(date)}</div>`,
+    `<div class="pick-list">${cards}</div>${extra}`);
+};
+window._assignWorkout=async(date,wkey)=>{
+  await put('plan',{date,workout:wkey});
+  window._closeModal();
+  viewDate=date;
+  renderToday();
+  toast(WORKOUTS[wkey].name+' ορίστηκε ✓');
+};
+window._clearWorkout=async(date)=>{
+  await del('plan',date);
+  window._closeModal();
+  renderToday();
+  toast('Αφαιρέθηκε');
+};
 
 function nextTrainingDay(){
   const today=new Date().getDay();
@@ -417,10 +526,11 @@ window._toggleSession=async date=>{
   toast(ns?'Προπόνηση ολοκληρώθηκε 💪':'Αναιρέθηκε');
 };
 
-async function dayProgress(date,dk){
-  const p=PROGRAM[dk]; let total=0,done=0;
+async function dayProgress(date,wkey){
+  const wk=WORKOUTS[wkey]; let total=0,done=0;
+  if(!wk) return {doneSets:0,total:0,pct:0};
   const sets=await getDaySets(date);
-  p.ex.forEach(k=>{ total+=EX[k].sets; });
+  wk.ex.forEach(k=>{ total+=EX[k].sets; });
   done=sets.filter(s=>s.done).length;
   return {doneSets:done, total, pct: total?Math.min(100,Math.round(done/total*100)):0};
 }
@@ -460,19 +570,26 @@ async function calendarHTML(){
   const tod=new Date();
   const sessions=await all('sessions');
   const doneMap={}; sessions.forEach(s=>{if(s.status)doneMap[s.date]=true;});
+  const plans=await all('plan');
+  const planMap={}; plans.forEach(p=>{planMap[p.date]=p.workout;});
 
   let grid='';
-  for(let i=0;i<first;i++) grid+='<div class="cal-d"></div>';
+  for(let i=0;i<first;i++) grid+='<div class="cal-d empty"></div>';
   for(let d=1;d<=days;d++){
     const jsd=new Date(y,m,d).getDay();
-    const train=dayKeyByJs[jsd];
+    const baseTrain=dayKeyByJs[jsd];      // suggested base-week training day
     const k=dkey(y,m,d);
     const done=doneMap[k];
+    const assigned=planMap[k];            // user-assigned workout
+    const hasWork = assigned || baseTrain;
     const isToday=(d===tod.getDate()&&m===tod.getMonth()&&y===tod.getFullYear());
-    let cls='cal-d';
-    if(done)cls+=' done'; else if(train)cls+=' train';
+    const isView=(k===viewDate);
+    let cls='cal-d tappable';
+    if(done)cls+=' done'; else if(assigned)cls+=' assigned'; else if(baseTrain)cls+=' train';
     if(isToday)cls+=' today';
-    grid+=`<div class="${cls}">${d}${train&&!done?'<span class="dot"></span>':''}</div>`;
+    if(isView)cls+=' viewing';
+    const dot = hasWork&&!done ? '<span class="dot"></span>' : '';
+    grid+=`<div class="${cls}" onclick="window._openDate('${k}')">${d}${dot}</div>`;
   }
   return `<div class="card">
     <div class="cal-nav">
@@ -484,6 +601,11 @@ async function calendarHTML(){
     </div>
     <div class="cal-grid">${head.map(h=>'<div class="cal-h">'+h+'</div>').join('')}</div>
     <div class="cal-grid" style="margin-top:5px">${grid}</div>
+    <div class="cal-legend">
+      <span><i class="lg done"></i> ολοκληρωμένη</span>
+      <span><i class="lg assigned"></i> δικό σου</span>
+      <span><i class="lg train"></i> προτεινόμενο</span>
+    </div>
   </div>`;
 }
 window._calMove=dir=>{
@@ -493,23 +615,86 @@ window._calMove=dir=>{
 };
 
 /* ============================================================
+   PLANNER — "suggest me days"
+   User picks how many sessions/week; we spread them across the
+   coming days with rest gaps and assign workouts in rotation.
+   ============================================================ */
+const ROTATION=["upperA","lowerA","upperB","lowerB"]; // core gets sprinkled
+function spreadDays(freq){
+  // returns array of offsets (days from today) for `freq` sessions across next 7 days
+  // even spacing, e.g. 3 -> [0,2,4] ; 4 -> [0,2,4,6] ; 2 -> [0,3]
+  const map={1:[0],2:[0,3],3:[0,2,4],4:[0,2,4,6],5:[0,1,3,4,6],6:[0,1,2,4,5,6]};
+  return map[freq]||map[3];
+}
+async function applyAutoPlan(freq){
+  const offsets=spreadDays(freq);
+  const today=new Date(); today.setHours(0,0,0,0);
+  let rot=0;
+  // clear existing future plan first (next 7 days) to avoid duplicates
+  for(let i=0;i<7;i++){
+    const d=new Date(today); d.setDate(d.getDate()+i);
+    const k=d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate();
+    if(!offsets.includes(i)) await del('plan',k);
+  }
+  for(const off of offsets){
+    const d=new Date(today); d.setDate(d.getDate()+off);
+    const k=d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate();
+    let wkey=ROTATION[rot%ROTATION.length]; rot++;
+    if(freq>=5 && off===offsets[offsets.length-1]) wkey="core"; // last session = core on high freq
+    await put('plan',{date:k,workout:wkey});
+  }
+  await put('profile',{key:'freq',value:freq});
+  toast(freq+'× την εβδομάδα — οι μέρες μπήκαν ✓');
+  renderProgram(); renderToday();
+}
+window._autoPlan=freq=>applyAutoPlan(freq);
+
+async function getFreq(){ const f=await get('profile','freq'); return f?f.value:null; }
+
+/* days since last completed session — used for the reminder */
+async function daysSinceLast(){
+  const sessions=(await all('sessions')).filter(s=>s.status);
+  if(!sessions.length) return null;
+  let latest=0;
+  sessions.forEach(s=>{ const [Y,M,D]=s.date.split('-').map(Number); const t=new Date(Y,M-1,D).getTime(); if(t>latest)latest=t; });
+  const today=new Date(); today.setHours(0,0,0,0);
+  return Math.round((today.getTime()-latest)/86400000);
+}
+
+async function plannerHTML(){
+  const freq=await getFreq();
+  const opts=[2,3,4,5].map(n=>`<button class="freq-btn ${freq===n?'on':''}" onclick="window._autoPlan(${n})">${n}×</button>`).join('');
+  return `<div class="card planner">
+    <div class="planner-head">
+      <div><div class="planner-title">Πρότεινέ μου μέρες</div>
+      <div class="planner-sub">Πόσες προπονήσεις θες την εβδομάδα; Θα τις μοιράσω με σωστή ξεκούραση.</div></div>
+    </div>
+    <div class="freq-row">${opts}</div>
+    ${freq?`<div class="planner-note">✓ Ορισμένο: <b>${freq}× / εβδομάδα</b>. Δες τις μέρες στο ημερολόγιο (tab «Σήμερα»). Μπορείς πάντα να αλλάξεις χειροκίνητα οποιαδήποτε μέρα.</div>`:''}
+  </div>`;
+}
+
+/* ============================================================
    PROGRAM panel
    ============================================================ */
-function renderProgram(){
-  let html='';
-  dayOrder.forEach(dk=>{
-    const p=PROGRAM[dk];
+async function renderProgram(){
+  // planner at top
+  $('#planner-mount').innerHTML=await plannerHTML();
+
+  // show ALL available workouts as the catalog (the base week is just a suggestion)
+  let html='<div class="section-lab">Διαθέσιμες προπονήσεις</div>';
+  WORKOUT_ORDER.forEach(wkey=>{
+    const p=WORKOUTS[wkey]; const mc=muscleColor[p.accent];
     html+=`<div class="card"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-      <div style="font-size:17px;font-weight:800">${dayGr[dk]}</div>
-      <span class="ex-tag" style="color:var(--amber);background:var(--amber-glow)">${p.name}</span></div>
-      <div style="font-size:12.5px;color:var(--chalk-2);margin-bottom:10px">${p.focus}</div>`;
+      <div style="font-size:17px;font-weight:800">${p.name}</div>
+      <span class="ex-tag" style="color:${mc.c};background:${mc.bg}">${p.focus}</span></div>`;
     p.ex.forEach(k=>{
-      const ex=EX[k]; const mc=muscleColor[ex.g];
+      const ex=EX[k]; const m2=muscleColor[ex.g];
       html+=`<div class="ex-top" style="padding:9px 0;cursor:default">
         <div class="ex-demo" style="width:44px;height:44px">${demo(ex.demo,false)}</div>
         <div class="ex-info"><div class="ex-name">${ex.n}</div>
         <div class="ex-target">${ex.type==='time'?'κράτα '+fmtT(ex.targetSec):ex.sets+' × '+ex.reps}</div></div>
-        <span class="ex-tag" style="color:${mc.c};background:${mc.bg}">${muscleName[ex.g]}</span></div>`;
+        <span class="ex-tag" style="color:${m2.c};background:${m2.bg}">${muscleName[ex.g]}</span></div>`;
     });
     html+='</div>';
   });
@@ -522,8 +707,8 @@ function renderProgram(){
 function renderGuide(){
   const seen={}; let id=0;
   let html='';
-  dayOrder.forEach(dk=>{
-    PROGRAM[dk].ex.forEach(k=>{
+  WORKOUT_ORDER.forEach(wkey=>{
+    WORKOUTS[wkey].ex.forEach(k=>{
       if(seen[k])return; seen[k]=1;
       const ex=EX[k]; const g=GUIDES[k]; if(!g)return;
       id++; const gid='g'+id; const mc=muscleColor[ex.g];
@@ -552,8 +737,8 @@ function renderGuide(){
 window._gToggle=id=>{ $('#body-'+id).classList.toggle('open'); $('#chev-'+id).classList.toggle('open'); };
 
 /* expose engine bits to part 3 */
-window.__CALIS_ENGINE__={ initDB, put, get, all, clearStore, $, todayKey, dkey, fmtT, toast,
-  renderToday, renderProgram, renderGuide, PROGRAM, EX, dayKeyByJs, dayGr, dayOrder, muscleName, getDaySets };
+window.__CALIS_ENGINE__={ initDB, put, get, all, del, clearStore, $, todayKey, dkey, fmtT, toast,
+  renderToday, renderProgram, renderGuide, PROGRAM, WORKOUTS, WORKOUT_ORDER, EX, dayKeyByJs, dayGr, dayOrder, muscleName, getDaySets, getFreq };
 })();
 
 /* ============================================================
@@ -562,7 +747,7 @@ window.__CALIS_ENGINE__={ initDB, put, get, all, clearStore, $, todayKey, dkey, 
 (function(){
 'use strict';
 const E=window.__CALIS_ENGINE__;
-const {initDB,put,get,all,clearStore,$,todayKey,fmtT,toast,renderToday,renderProgram,renderGuide,PROGRAM,EX,dayKeyByJs,dayGr,muscleName,getDaySets}=E;
+const {initDB,put,get,all,del,clearStore,$,todayKey,fmtT,toast,renderToday,renderProgram,renderGuide,PROGRAM,WORKOUTS,WORKOUT_ORDER,EX,dayKeyByJs,dayGr,muscleName,getDaySets}=E;
 const muscleColor=window.__CALIS__.muscleColor;
 
 /* ---------- API key storage (kept on-device) ---------- */
@@ -704,14 +889,27 @@ async function buildContext(){
   });
   const progLines=Object.keys(lastByEx).map(k=>`${EX[k]?EX[k].n:k}: τελευταίο ${lastByEx[k].reps||'-'}${lastByEx[k].note?' ('+lastByEx[k].note+')':''}`).slice(0,12);
 
+  // weekly frequency preference + upcoming planned sessions
+  const freqP=profiles.find(p=>p.key==='freq');
+  const weeklyTarget=freqP?freqP.value:null;
+  const plans=await all('plan');
+  const todayT=new Date(); todayT.setHours(0,0,0,0);
+  const upcoming=plans.filter(p=>{
+    const [Y,M,D]=p.date.split('-').map(Number);
+    return new Date(Y,M-1,D).getTime()>=todayT.getTime();
+  }).sort((a,b)=>(a.date<b.date?-1:1)).slice(0,7)
+    .map(p=>`${p.date}: ${WORKOUTS[p.workout]?WORKOUTS[p.workout].name:p.workout}`);
+
   return {
     totalSessions:sessions.length,
     totalSets:sets.length,
     volume:vol,
     recentDates:recent,
+    weeklyTarget,
+    upcomingPlan:upcoming,
     readiness:readiness.map(r=>({date:r.date,score:readinessScore(r).toFixed(1),sleep:r.sleep,energy:r.energy,stress:r.stress,soreness:r.soreness})),
     progression:progLines,
-    program:Object.keys(PROGRAM).map(dk=>`${dayGr[dk]} (${PROGRAM[dk].name}): ${PROGRAM[dk].ex.map(k=>EX[k].n).join(', ')}`)
+    workouts:WORKOUT_ORDER.map(wk=>`${WORKOUTS[wk].name}: ${WORKOUTS[wk].ex.map(k=>EX[k].n).join(', ')}`)
   };
 }
 
@@ -806,6 +1004,16 @@ window._saveKey=async()=>{
   if(!k){toast('Βάλε ένα key');return;}
   await saveKey(k,_selProv);
   window._closeModal(); toast('AI Coach ενεργό 🎉'); renderCoach();
+};
+window._openModal=(title,bodyHtml)=>{
+  const bg=document.querySelector('#modal-bg');
+  bg.innerHTML=`<div class="modal">
+    <h3>${title}</h3>
+    ${bodyHtml}
+    <button class="btn btn-ghost" style="margin-top:10px" onclick="window._closeModal()">Κλείσιμο</button>
+  </div>`;
+  bg.classList.add('open');
+  bg.onclick=e=>{if(e.target===bg)window._closeModal();};
 };
 window._closeModal=()=>{const bg=$('#modal-bg');bg.classList.remove('open');bg.innerHTML='';};
 
